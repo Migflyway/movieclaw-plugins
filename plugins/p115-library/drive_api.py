@@ -370,7 +370,7 @@ class Drive:
             return tree
         except asyncio.CancelledError:raise
         except DriveError:return tree
-    async def scan(self,root,cancel=None,bad_sink=None,skip_dirs=None,keep=None):
+    async def scan(self,root,cancel=None,bad_sink=None,keep=None):
         """2.7.0 fast enumeration; 2.7.2 streams.
 
         1. Files: ONE flat, paged listing of the whole subtree (cur=0,

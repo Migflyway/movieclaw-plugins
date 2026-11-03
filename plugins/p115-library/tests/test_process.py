@@ -59,6 +59,15 @@ def respond(request):
   return httpx.Response(200,json={'state':True,'data':'encrypted-test-fixture'})
  return httpx.Response(500)
 net.http_transport=lambda service:httpx.MockTransport(respond)
+# Settings floors request_interval at 0.3 s and every config save re-applies it,
+# so the child would pay ~30 real 0.3 s pacing waits against this mock (no rate
+# limit to respect). Skip only those pacing waits (<= the interval); longer
+# waits (throttle cooldowns, >= 1 s) still go through the real sleep.
+_real_sleep=drive_api.Drive.sleep
+async def _no_pacing(self,seconds):
+ if seconds<=self.cfg.request_interval:return
+ await _real_sleep(self,seconds)
+drive_api.Drive.sleep=_no_pacing
 drive_api.rsa_decrypt=lambda data:b'{"10":{"url":{"url":"https://cdn.example.com/movie.mkv?f=1"}},"23":{"url":{"url":"https://cdn.example.com/subtitle.srt?f=1"}}}'
 sys.argv=['runner','--path',sys.argv[1],'--module','p115_plugin','--entry','p115-library','--fd-socket',sys.argv[2],'--listen-fd',sys.argv[3]]
 runpy.run_module('movieclaw_sdk.runner',run_name='__main__')
@@ -183,7 +192,9 @@ runpy.run_module('movieclaw_sdk.runner',run_name='__main__')
     await asyncio.sleep(.03)
    assert (root/'auto-strm/Movie.strm').exists(),(await client.get('/strm/status')).json()
    for _ in range(200):
-    if (root/'auto-strm/Movie.srt').exists():break
+    # New sidecars are written in place (2.7.3 direct write), so the file can
+    # briefly exist with zero bytes -- wait for the content, not just the name.
+    if (root/'auto-strm/Movie.srt').exists() and (root/'auto-strm/Movie.srt').stat().st_size:break
     await asyncio.sleep(.03)
    assert (root/'auto-strm/Movie.srt').exists() and (root/'auto-strm/Movie.srt').read_bytes() in (b'movie bytes',b'subtitle bytes'),'云端附属应经直链下载到 STRM 目录'
    # 2.2.1：网盘 mock 含一个名称非法的条目（坏\名字.mkv）——同步不得因此中止，
@@ -257,9 +268,13 @@ runpy.run_module('movieclaw_sdk.runner',run_name='__main__')
    r=await client.head(public);assert r.status_code==200 and not r.content
    rng=await client.get(public,headers={'Range':'bytes=0-4'});assert rng.status_code==206 and rng.content==b'movie','Range 应透传给 CDN'
    assert (await client.post('/config',json={'values':{'play_mode':'bad'}})).status_code==400
-   assert (await client.post('/config',json={'values':{'strm_conflict_policy':'bad'}})).status_code==400
-   r=await client.post('/config',json={'values':{'strm_conflict_policy':'abort'}});assert r.json()=={'applied':True},r.text
-   r=await client.post('/config',json={'values':{'strm_conflict_policy':'auto'}});assert r.json()=={'applied':True},r.text
+   # 2.8.4：「同名 STRM 冲突」设置已退役——旧面板/旧备份带上该键（任意值，含旧版会拒绝的值）
+   # 一律静默忽略，保存与重置均成功，GET /config 不再回显；真正未知的键仍报 400。
+   for v in ('bad','abort','auto'):
+    r=await client.post('/config',json={'values':{'strm_conflict_policy':v}});assert r.json()=={'applied':True},r.text
+   r=await client.post('/config',json={'values':{'strm_conflict_policy':'abort','not_a_field':1}});assert r.status_code==400 and 'not_a_field' in r.text,r.text
+   r=await client.post('/config/reset',json={'fields':['strm_conflict_policy']});assert r.json()=={'applied':True},r.text
+   assert 'strm_conflict_policy' not in (await client.get('/config')).json()['values']
    # v1.7.5 播放拉流日志：成功路径也要进运行日志（此前只记失败，用户看不到拉取情况）；
    # 中转拉流完成事件在响应流结束后异步写入，轮询等待。
    for _ in range(100):
@@ -312,9 +327,12 @@ runpy.run_module('movieclaw_sdk.runner',run_name='__main__')
    assert 'rewrite-result' in html and 'rewriteStrm' in html and '/strm/rewrite' in html,'2.1.0 存量 STRM 地址替换未接入面板'
    exp=await client.get('/config/export');assert exp.status_code==200 and 'cookie' not in exp.text
    payload=exp.json();payload['values']['min_video_mb']=9
+   assert 'strm_conflict_policy' not in payload['values'],'导出不再包含已退役设置'
+   payload['values']['strm_conflict_policy']='abort'  # 2.8.4 之前导出的备份带有该键
    r=await client.post('/config/import',json={'values':payload['values']});assert r.json()=={'applied':True},r.text
    cfg4=(await client.get('/config')).json()
    assert cfg4['values']['min_video_mb']==9 and json.loads(cfg4['values']['mappings'])==json.loads(maps),'导入应立即生效且保留映射'
+   assert 'strm_conflict_policy' not in cfg4['values'],'已退役设置不回显'
    # v2.1.0 存量 STRM 地址替换：外网地址变更后，不重新枚举网盘即可刷新存量 STRM。
    # 预览不改文件；执行只换 origin（路径+签名保留）；已停用映射的目录不被触碰。
    map_a=root/'map-a/Movie.strm';assert map_a.exists()

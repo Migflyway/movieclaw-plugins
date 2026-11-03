@@ -432,12 +432,16 @@ async def test_conflict_resolution_stable_and_self_heals(tmp_path):
 async def test_old_abort_setting_no_longer_stops_sync_and_logs_nothing_per_conflict(tmp_path):
  # 2.7.7：「中止同步」选项已移除——旧设置里残留的 abort 按「保留较大」处理；
  # 冲突不再逐条写运行日志，只计数（同步历史保留前 10 条明细）。
- assert Settings(strm_conflict_policy='abort').strm_conflict_policy=='auto'
+ # 2.8.4：该设置项已退役，旧设置/备份里残留的键（任意值）与未来未知键一样被忽略。
+ old=Settings(**{'strm_conflict_policy':'abort','unknown_future_key':1,'min_video_mb':3})
+ assert old.min_video_mb==3 and not hasattr(old,'strm_conflict_policy') and not hasattr(old,'unknown_future_key')
  engine=setup(tmp_path,strm_conflict_policy='abort')
  engine.drive.items.append({**engine.drive.items[0],'id':'2','path':'影片 (2026)/影片.mp4','size':500,'pickcode':'largerpick'})
  result=await engine.run()
  assert result['conflicts']==1 and result['written']==1
  assert len(list(tmp_path.rglob('*.strm')))==1
+ plays=play_records(engine.store)
+ assert len(plays)==1 and plays[0]['pickcode']=='largerpick','同名冲突必须保留体积较大的那个：'+repr(plays)
  logs=engine.store.data.get('runtime-log',[])
  assert not any('同名 STRM 冲突' in r['message'] for r in logs),'冲突不应逐条刷运行日志'
  assert '影片.mkv' in ''.join(result['mappings'][0]['conflict_detail'])

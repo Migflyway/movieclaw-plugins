@@ -302,9 +302,8 @@ async def test_prime_links_refused_falls_back_quietly(monkeypatch):
     assert await drive.prime_links(['abcdef000001','abcdef000002'])==0
 
 def test_max_entries_unlimited_by_default_and_old_defaults_migrated():
-    import panel
     assert p.Settings().max_entries==0,'默认不限制'
-    assert 'data-field="max_entries"' in panel.PANEL and "'max_entries'" in panel.PANEL
+    assert 'data-field="max_entries"' in p.PANEL and "'max_entries'" in p.PANEL
     src=open(p.__file__,encoding='utf-8').read()
     assert "stored.get('max_entries') in (100000,1000000)" in src,'两个旧默认值都必须迁移为不限'
 

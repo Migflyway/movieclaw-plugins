@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from datetime import datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit,parse_qs
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -19,9 +19,11 @@ from movieclaw_api.plugins.keys import HOST_OPS, PLUGIN_DATA, PLUGIN_FILES, PLUG
 from drive_api import Drive, DriveError, rebase_url
 from runlog import log_event
 from sync_engine import scope_key
-from panel import PANEL
 from prefetch import Prefetcher
 
+# web/index.html is the single source of the console page: the host serves it
+# at /web/ and the admin /panel route returns the very same bytes.
+PANEL=(Path(__file__).resolve().parent/'web'/'index.html').read_text('utf-8')
 OPS=('library.scan.start','library.list')
 
 DEFAULT_SUFFIXES='mkv,mp4,avi,mov,m4v,ts,m2ts,wmv,flv,webm,mpg,mpeg,iso'
@@ -48,10 +50,6 @@ class Settings(BaseModel):
     strm_base_url:str=Field('',title='STRM 直连地址（可选，外网用）',description='留空=按当前访问地址自动签发；填写后 STRM 内播放地址改用该地址开头（如外网域名 http://www.example.com:9577），地址必须能路由回本 MovieClaw 服务，路径与签名保持不变。')
     strm_keep_suffix:bool=Field(False,title='STRM 保留文件后缀',description='开启后生成「影片.mkv.strm」，关闭生成「影片.strm」；切换后旧命名的 STRM 按清理策略处理。')
     strm_exist_policy:str=Field('overwrite',title='STRM 本地存在时',description='overwrite=覆盖生成（仅限插件生成且未被手工修改的文件）；skip=直接跳过。用户改过的文件两种模式都不覆盖。')
-    # 2.7.7: kept only so old saved settings / config backups still load.
-    # Same-name videos (X.mkv + X.mp4) always keep the bigger one; the
-    # former 'abort' choice (stop the whole sync) is gone.
-    strm_conflict_policy:str=Field('auto',title='同名 STRM 冲突时（已固定为保留较大）',description='同一目录两个不同格式的同名视频（如 X.mkv 与 X.mp4）生成同一个 STRM 时，固定保留体积较大的那个；如需两个都保留，请开启「STRM 保留文件后缀」。')
     video_suffixes:str=Field(DEFAULT_SUFFIXES,title='视频文件后缀',description='逗号分隔；网盘核对按此识别视频。')
     min_video_mb:int=Field(0,ge=0,le=1048576,title='最小视频体积（MB）',description='小于该体积的视频不生成 STRM；0 表示不限制。')
     sidecar_sync:bool=Field(True,title='同步图片/NFO/字幕',description='视频所在目录、其各级上级目录（剧集/季/合集层）及 extrafanart / extrathumbs 里的 .nfo/.jpg/.jpeg/.png/.webp/.tbn 与字幕，经 115 直链下载到 STRM 目录对应位置，单文件最大 20MB；不含视频的目录不同步；随扫描边下载。')
@@ -95,11 +93,6 @@ class Settings(BaseModel):
     def exist_policy_ok(cls,v):
         if v not in ('overwrite','skip'):raise ValueError('本地存在策略仅支持 overwrite 或 skip')
         return v
-    @field_validator('strm_conflict_policy')
-    @classmethod
-    def conflict_policy_ok(cls,v):
-        if v not in ('auto','abort'):raise ValueError('同名冲突策略仅支持 auto 或 abort')
-        return 'auto'  # 2.7.7: 'abort' is retired; accepted for old backups
     play_mode:str=Field('302',title='STRM 播放方式',description='302=播放器直连 115 CDN 拉流（默认，服务器不中转视频字节）；proxy=MovieClaw 服务器中转拉流（兼容所有播放器与需附加 Cookie 的受限直链，302 播放异常时优先切换此项）。')
     @field_validator('play_mode')
     @classmethod
@@ -201,9 +194,15 @@ class LoginStart(BaseModel):
 # the plugin, exactly like editing them on the MovieClaw settings page.
 EDITABLE={'cookie','request_interval','timeout','page_size','max_entries','allow_cloud_changes','retry_max','retry_cooldown',
           'cloud_cid','strm_directory',
-          'strm_link_format','strm_keep_suffix','strm_exist_policy','strm_conflict_policy','video_suffixes','min_video_mb',
+          'strm_link_format','strm_keep_suffix','strm_exist_policy','video_suffixes','min_video_mb',
           'sync_mode','scan_strategy','sync_cron','life_events','life_interval','sidecar_sync','strm_cleanup','strm_base_url',
           'mappings','api_user_agent','play_mode','link_cache_minutes','prefetch_episodes'}
+# 2.8.4: settings that no longer exist. Old saved panel-settings and config
+# backups still carry them; they are dropped silently (Settings ignores unknown
+# keys, and /config, /config/import and /config/reset strip them before the
+# unknown-key check) so those backups keep importing.
+# strm_conflict_policy: fixed to "keep the bigger file" since 2.7.7.
+RETIRED_SETTINGS=frozenset({'strm_conflict_policy'})
 
 class ConfigPayload(BaseModel):
     values:dict=Field(default_factory=dict)
@@ -428,6 +427,7 @@ async def apply(ctx):
         return result
     async def apply_settings(patch,origin='保存'):
         """Validate, persist to plugin-private storage, then hot-apply without a host restart."""
+        patch={f:v for f,v in patch.items() if f not in RETIRED_SETTINGS}
         unknown=set(patch)-EDITABLE
         if unknown:raise HTTPException(400,'不支持的配置项：'+','.join(sorted(unknown)))
         candidate={f:getattr(cfg,f) for f in EDITABLE}
@@ -474,11 +474,12 @@ async def apply(ctx):
         return await apply_settings(dict(body.values))
     @admin.post('/config/reset',operation_id='plugins.p115-library.config.reset',summary='重置指定配置项为默认值（立即生效）')
     async def config_reset(body:ResetPayload):
-        unknown=set(body.fields)-EDITABLE
+        fields=[f for f in body.fields if f not in RETIRED_SETTINGS]
+        unknown=set(fields)-EDITABLE
         if unknown:raise HTTPException(400,'不支持的配置项：'+','.join(sorted(unknown)))
-        if not body.fields:return {'applied':True}
+        if not fields:return {'applied':True}
         defaults=Settings();patch={}
-        for name in body.fields:
+        for name in fields:
             value=getattr(defaults,name)
             patch[name]=value.get_secret_value() if isinstance(value,SecretStr) else value
         return await apply_settings(patch)
@@ -534,7 +535,7 @@ async def apply(ctx):
     @admin.get('/config/export',operation_id='plugins.p115-library.config.export',summary='导出配置备份（不含 Cookie）')
     async def config_export():
         values={f:getattr(cfg,f) for f in sorted(EDITABLE) if f!='cookie'}
-        body=json.dumps({'plugin':'p115-library','version':'2.8.3','values':values},ensure_ascii=False,indent=2)
+        body=json.dumps({'plugin':'p115-library','version':'2.8.4','values':values},ensure_ascii=False,indent=2)
         return Response(body,media_type='application/json',headers={'Content-Disposition':'attachment; filename="p115-library-config.json"'})
     @admin.post('/config/import',operation_id='plugins.p115-library.config.import',summary='导入配置备份（校验后立即生效，Cookie 不受影响）')
     async def config_import(body:ConfigPayload):

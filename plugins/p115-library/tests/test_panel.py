@@ -7,14 +7,17 @@ These tests make that class of failure impossible to ship again.
 """
 import re,shutil,subprocess,tempfile,os
 import pytest
-import panel as panel_mod
+import pathlib
+import p115_plugin
+
+WEB_INDEX=pathlib.Path(__file__).parent.parent/'web'/'index.html'
 
 @pytest.fixture(scope='module')
 def split():
-    m=re.search(r'<script>(.*)</script>',panel_mod.PANEL,re.S)
+    m=re.search(r'<script>(.*)</script>',p115_plugin.PANEL,re.S)
     assert m,'面板缺少内联 script'
     js=m.group(1)
-    rest=panel_mod.PANEL.replace(m.group(0),'<script></script>')
+    rest=p115_plugin.PANEL.replace(m.group(0),'<script></script>')
     return js,rest
 
 def test_script_js_syntax(split):
@@ -112,13 +115,13 @@ def test_panel_exposes_stop_and_clear_checkpoint(split):
     assert '断点续传' in rest,'全量页需说明断点续传与清理断点的用法'
     assert 'checkpoint_dirs' in js and '断点记录' in js,'状态区须显示断点记录数（排查「不跳过」的关键）'
 
-def test_web_index_generated_from_panel():
-    """web/index.html 由打包脚本从 panel.PANEL 生成——同一份 HTML 双挂载，
-    不允许出现第二份手工副本漂移。这里验证生成物与常量逐字节一致。"""
-    import pathlib
-    web=pathlib.Path(__file__).parent.parent/'web'/'index.html'
-    if not web.is_file():pytest.skip('打包前生成，源码树无此文件')
-    assert web.read_text()==panel_mod.PANEL,'web/index.html 必须与 panel.PANEL 完全一致（由打包脚本生成）'
+def test_panel_route_serves_web_index_verbatim():
+    """2.8.4: web/index.html is the single source -- the host serves it at
+    /web/ and the admin /panel route returns p115_plugin.PANEL, which is read
+    from that file. Both mounts must stay byte-identical (no second copy)."""
+    assert WEB_INDEX.is_file()
+    assert p115_plugin.PANEL==WEB_INDEX.read_text('utf-8'),'/panel 必须与 web/index.html 逐字节一致'
+    assert not (WEB_INDEX.parent.parent/'panel.py').exists(),'不允许再出现 panel.py 副本'
 
 
 def test_every_settings_row_has_exactly_label_and_one_content_column():
@@ -140,7 +143,7 @@ def test_every_settings_row_has_exactly_label_and_one_content_column():
                 node=self.stack.pop()
                 if node['row'] and len(node['kids'])!=2:self.bad.append((node['pos'],node['kids']))
                 if node['tag']==tag:break
-    html=panel_mod.PANEL
+    html=p115_plugin.PANEL
     html=html[:html.index('<script>')]+html[html.index('</script>')+9:]
     p=P();p.feed(html)
     assert not p.bad,'以下 .row 不是「label + 一个内容 div」两列结构（会歪）：%r'%p.bad[:5]
@@ -149,7 +152,7 @@ def test_every_settings_row_has_exactly_label_and_one_content_column():
 def test_usage_guide_page_in_console():
     """2.8.2: the usage guide lives in the console (sidebar entry + page),
     stating that STRM can only be written inside a MovieClaw media library."""
-    html=panel_mod.PANEL
+    html=p115_plugin.PANEL
     assert 'data-page="guide"' in html and 'id="page-guide"' in html and "guide:'使用说明'" in html
     i=html.index('id="page-guide"');page=html[i:html.index('</section>',i)]
     assert '新建媒体库' in page and '媒体库目录' in page and '写入被拒绝' in page and '手动扫描' in page

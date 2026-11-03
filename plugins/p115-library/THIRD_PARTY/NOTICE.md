@@ -15,6 +15,7 @@ Sources:
 
 ## 1.1.0 新增
 
-p115_aes.py、p115_upload_crypto.py 来自 p115cipher 0.0.6 的 AES/上传协议代码（ChenyangGao，GPL-3.0-or-later）；提取纯 Python 实现、替换依赖并增加 LZ4 边界检查。原许可证见 p115cipher-LICENSE_zh。
-qrcode/ 为 python-qrcode 8.2（BSD 3-Clause），去除测试和缓存；许可证见 qrcode-LICENSE。
+p115_aes.py（AES）与 p115_ecdh.py（ECDH 响应信封子集：固定密钥 AES-CBC + 带边界检查的 LZ4）来自 p115cipher 0.0.6（ChenyangGao，GPL-3.0-or-later）；提取纯 Python 实现、替换依赖并增加 LZ4 边界检查，上传专用部分已随 2.0.0 移除上传功能一并删除。原许可证见 p115cipher-LICENSE_zh。
+p115_m115.py 不来自 p115cipher，是 SheltonZhu/115driver pkg/crypto/m115 的逐行移植（GPL-3.0-or-later）。
+扫码登录二维码由主程序（MovieClaw）自带的 `qrcode` 库生成，插件不再内置该库。
 上传 wire contract 参考 p115oss 0.1.2（https://pypi.org/project/p115oss/0.1.2/）；插件异步上传和队列实现独立编写。

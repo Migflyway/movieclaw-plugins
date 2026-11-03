@@ -414,7 +414,6 @@ class SyncEngine:
     def __init__(self,cfg,drive,store,files,ops,routes,ctx):
         self.cfg,self.drive,self.store,self.files,self.ops,self.routes,self.ctx=cfg,drive,store,files,ops,routes,ctx
         self.lock=asyncio.Lock();self.cancelled=False;self.status={'state':'idle'}
-        self.sidecar_hashes={}
         self.play_index=PlayIndex(store)
         # Directories already created this run -- see atomic_write().
         self._dirs=set()
@@ -450,7 +449,7 @@ class SyncEngine:
     async def run(self,mode='incremental',dry_run=False):
         if self.lock.locked():raise DriveError('已有同步正在运行')
         async with self.lock:
-            self.cancelled=False;self.sidecar_hashes={};self._dirs=set();self._tails={};self._flushed=0.;self._last_logged=time.monotonic();self._pending_marked=set();self._run_mode=mode
+            self.cancelled=False;self._dirs=set();self._tails={};self._flushed=0.;self._last_logged=time.monotonic();self._pending_marked=set();self._run_mode=mode
             self.drive.throttle_stats={'waits':0,'waited':0.,'last':''}
             started=time.monotonic()
             async def finish(**values):
@@ -592,57 +591,6 @@ class SyncEngine:
         if marked is None:marked=self._pending_marked=set()
         if key in marked:return
         await self.store.set(key+':scan-pending',True);marked.add(key)
-    async def pull_cloud_sidecars(self,base,folder,stem,record,old,key,dry_run,candidates,exists=None,trust=False):
-        """Sync subtitles/NFO/posters that exist only in the cloud (qmediasync
-        download_meta). They were usually uploaded by other clients, so the
-        organized directory cannot supply them locally; fetch via direct link.
-        Ownership rules: user-modified files are never touched,
-        and the 115 sha1 identity is recorded so later runs detect upstream changes."""
-        if not getattr(self.cfg,'sidecar_sync',False) or not candidates:return
-        sc=record.setdefault('sidecars',{});cloud=record.setdefault('cloud',{})
-        for rel,item in candidates:
-            target_rel=rel.as_posix()
-            if target_rel in sc:continue  # local organized copy already covers it
-            try:target_path=os.path.join(base,*safe_relative(target_rel).parts)
-            except DriveError:continue
-            previous=(old or {}).get('sidecars',{}).get(target_rel)
-            prior_id=(old or {}).get('cloud',{}) if isinstance(old,dict) else None
-            prior_id=prior_id.get(target_rel) if isinstance(prior_id,dict) else None
-            if not isinstance(prior_id,dict):prior_id=None
-            existing=self.sidecar_hashes.get(target_rel)
-            exists_fn=exists or self.files.exists
-            # 2.7.0: a clean previous run already recorded this sidecar's local
-            # hash AND its 115 identity; when 115 still reports the same sha1
-            # and the file is still there, trust the record instead of reading
-            # the whole poster/NFO back every run (that read-back was MBs of
-            # host IPC per movie on large libraries).
-            if (existing is None and trust and previous and prior_id and item['sha1']
-                    and prior_id.get('sha1')==item['sha1'] and await exists_fn(target_path)):
-                sc[target_rel]=previous
-                cloud[target_rel]={'sha1':item['sha1'],'size':item['size'],'mtime':item['mtime']}
-                continue
-            if existing is None and await exists_fn(target_path):
-                try:raw=await read_bytes(self.files,target_path,SIDECAR_MAX+1)
-                except OSError:continue
-                if len(raw)>SIDECAR_MAX:continue
-                existing=hashlib.sha256(raw).hexdigest();self.sidecar_hashes[target_rel]=existing
-            if existing is not None and existing!=previous:
-                sc[target_rel]=existing;continue  # user file: never overwrite
-            data=None
-            if existing is None or not prior_id or not item['sha1'] or prior_id.get('sha1')!=item['sha1']:
-                try:data=await self.fetch_cloud_sidecar(item['pickcode'])
-                except DriveError:continue  # transient: retried on the next run
-            if data is not None:
-                digest=hashlib.sha256(data).hexdigest()
-                if existing is None or digest!=existing:
-                    if not dry_run:
-                        await self.mark_scan_pending(key)
-                        await atomic_write(self.files,target_path,data,self._dirs)
-                    await self.report(sidecars=self.status.get('sidecars',0)+1)
-                    sc[target_rel]=digest;self.sidecar_hashes[target_rel]=digest
-                elif existing is not None:sc[target_rel]=existing
-            elif existing is not None:sc[target_rel]=existing
-            cloud[target_rel]={'sha1':item['sha1'],'size':item['size'],'mtime':item['mtime']}
     async def rewrite_origins(self,target_origin,old_origin='',dry_run=False):
         """2.1.0: refresh the origin baked into existing STRM files.
 

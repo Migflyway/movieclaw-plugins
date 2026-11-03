@@ -54,8 +54,10 @@ def _ecdh_envelope(obj):
 def cfg(**values):
  # 2.4.0：默认不重试，让既有「立即失败」的断言保持即时语义（不会被真实冷却拖慢）；
  # 退避行为由 test_throttle_* 单独用显式 retry_max/retry_cooldown 覆盖。
+ # Settings 要求 request_interval>=0.3（生产下限）；mock 传输没有风控可言，构造后
+ # 置 0，免得每个请求真实等待 0.3 秒（本文件没有测请求间隔节奏的用例）。
  base=dict(cookie='UID=123_A1; CID=secret; SEID=secret',request_interval=.3,retry_max=0)
- base.update(values);return p.Settings(**base)
+ base.update(values);s=p.Settings(**base);s.request_interval=0.0;return s
 
 @pytest.mark.parametrize('row,expected',[
  ({'cid':'3','n':'目录'},('3',True)),({'fid':'4','cid':'3','n':'影片.mkv','s':'12','pc':'abcdef123456'},('4',False))])
@@ -564,7 +566,7 @@ def test_manifest_paths_library_only():
  import os,tomllib
  manifest_path=os.path.join(os.path.dirname(p.__file__),'movieclaw-plugin.toml')
  with open(manifest_path,'rb') as f:manifest=tomllib.load(f)
- assert manifest['plugin']['version']=='2.8.3'
+ assert manifest['plugin']['version']=='2.8.4'
  # 2.4.1：网页入口收敛为一个——侧边栏「115网盘」/apps/p115-library。
  # 插件描述不再写 /api/v1/plugins/.../panel 那条旧地址（宿主批准页会显示这段话）。
  desc=manifest['plugin']['description']
